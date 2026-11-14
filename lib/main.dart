@@ -1,15 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'theme/app_theme.dart';
 import 'screens/app_shell.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(
-    const ProviderScope(
-      child: SafeToSpendApp(),
-    ),
-  );
+  runApp(const SafeToSpendApp());
 }
 
 class SafeToSpendApp extends StatelessWidget {
@@ -20,8 +15,8 @@ class SafeToSpendApp extends StatelessWidget {
     return MaterialApp(
       title: 'Safe to Spend',
       debugShowCheckedModeBanner: false,
-      theme: AppTheme.lightTheme,
-      darkTheme: AppTheme.darkTheme,
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
       themeMode: ThemeMode.system,
       home: const AppShell(),
     );

@@ -139,12 +139,12 @@ class _InsightsScreenState extends State<InsightsScreen> {
               Container(
                 padding: const EdgeInsets.all(14),
                 decoration: BoxDecoration(
-                  color: AppColors.primaryGreenLight.withValues(alpha: isDark ? 0.1 : 1),
+                  color: AppColors.primaryGreen.withValues(alpha: isDark ? 0.1 : 1),
                   borderRadius: BorderRadius.circular(16),
                 ),
                 child: Row(
                   children: [
-                    const Icon(Icons.bolt_outlined, size: 17, color: AppColors.primaryGreenDark),
+                    const Icon(Icons.bolt_outlined, size: 17, color: AppColors.primaryGreen),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
@@ -335,7 +335,7 @@ class _InsightsScreenState extends State<InsightsScreen> {
                       Container(
                         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
                         decoration: BoxDecoration(
-                          color: AppColors.primaryGreenLight.withValues(alpha: isDark ? 0.15 : 1),
+                          color: AppColors.primaryGreen.withValues(alpha: isDark ? 0.15 : 1),
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: const Text('AI',
@@ -343,7 +343,7 @@ class _InsightsScreenState extends State<InsightsScreen> {
                                 fontSize: 9,
                                 fontWeight: FontWeight.w800,
                                 letterSpacing: 0.5,
-                                color: AppColors.primaryGreenDark)),
+                                color: AppColors.primaryGreen)),
                       ),
                     ],
                   ],

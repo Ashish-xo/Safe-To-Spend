@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
 import '../../theme/app_theme.dart';
 import 'home/home_screen.dart';
+import 'payments/payments_screen.dart';
+import 'budgets/budgets_screen.dart';
+import 'goals/goals_screen.dart';
+import 'more/more_screen.dart';
 import 'insights/insights_screen.dart';
 import 'assistant/assistant_screen.dart';
 
-/// Main app shell: Home (original) + AI Insights + AI Assistant,
-/// with a floating pill navigation bar.
+/// Main app shell matching the APK navigation:
+/// Home / Payments / Budgets / Goals / More — with Insights, Sage,
+/// Transactions and Settings reachable from More.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -16,100 +21,59 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _index = 0;
 
-  static const _screens = [HomeScreen(), InsightsScreen(), AssistantScreen()];
+  // Sub-screens pushed from "More" keep their own back navigation.
+  final _screens = const [
+    HomeScreen(),
+    PaymentsScreen(),
+    BudgetsScreen(),
+    GoalsScreen(),
+    MoreScreen(),
+  ];
 
-  void _onTap(int i) {
-    setState(() => _index = i);
-  }
+  static const _items = [
+    (Icons.home_outlined, Icons.home_rounded, 'Home'),
+    (Icons.event_repeat_outlined, Icons.event_repeat_rounded, 'Payments'),
+    (Icons.savings_outlined, Icons.savings_rounded, 'Budgets'),
+    (Icons.flag_outlined, Icons.flag_rounded, 'Goals'),
+    (Icons.menu_rounded, Icons.menu_rounded, 'More'),
+  ];
 
   @override
   Widget build(BuildContext context) {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      body: Stack(
-        children: [
-          // Keep all three alive so state (chat history) persists.
-          IndexedStack(
-            index: _index,
-            children: _screens,
-          ),
-          // Floating pill nav
-          Positioned(
-            left: 20,
-            right: 20,
-            bottom: 16,
-            child: Container(
-              padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 10),
-              decoration: BoxDecoration(
-                color: isDark ? AppColors.darkCardElevated : Colors.white,
-                borderRadius: BorderRadius.circular(28),
-                border: isDark
-                    ? Border.all(color: AppColors.darkDivider)
-                    : null,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: isDark ? 0.4 : 0.10),
-                    blurRadius: 24,
-                    offset: const Offset(0, 8),
-                  ),
-                ],
-              ),
-              child: Row(
-                children: [
-                  _navItem(context, isDark, 0, Icons.home_outlined, 'Home'),
-                  _navItem(context, isDark, 1, Icons.insights_outlined, 'Insights'),
-                  _navItem(context, isDark, 2, Icons.auto_awesome, 'Sage'),
-                ],
-              ),
+      body: IndexedStack(index: _index, children: _screens),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _index,
+        onDestinationSelected: (i) => setState(() => _index = i),
+        height: 72,
+        backgroundColor: AppColors.card(isDark),
+        indicatorColor: AppColors.primaryGreen.withValues(alpha: 0.14),
+        surfaceTintColor: Colors.transparent,
+        destinations: [
+          for (final (on, off, label) in _items)
+            NavigationDestination(
+              icon: Icon(on, color: AppColors.textSecondary(isDark)),
+              selectedIcon: Icon(off, color: AppColors.primaryGreen),
+              label: label,
             ),
-          ),
         ],
       ),
     );
   }
+}
 
-  Widget _navItem(BuildContext context, bool isDark, int i, IconData icon, String label) {
-    final active = _index == i;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => _onTap(i),
-        behavior: HitTestBehavior.opaque,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-          padding: const EdgeInsets.symmetric(vertical: 9),
-          decoration: BoxDecoration(
-            color: active
-                ? AppColors.primaryGreen.withValues(alpha: 0.14)
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                icon,
-                size: 20,
-                color: active ? AppColors.primaryGreen : AppColors.textSecondary(isDark),
-              ),
-              const SizedBox(width: 6),
-              AnimatedSize(
-                duration: const Duration(milliseconds: 200),
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                    color: active
-                        ? AppColors.primaryGreen
-                        : AppColors.textSecondary(isDark),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+/// Routes for sub-screens opened from More.
+/// (Sage and Insights remain flagship features, so they also get
+/// a shortcut chip row in More.)
+class MoreRoutes {
+  static const insights = '/insights';
+  static const sage = '/sage';
+  static const transactions = '/transactions';
+  static const settings = '/settings';
+
+  static Map<String, WidgetBuilder> build() => {
+        insights: (_) => const InsightsScreen(),
+        sage: (_) => const AssistantScreen(),
+      };
 }
