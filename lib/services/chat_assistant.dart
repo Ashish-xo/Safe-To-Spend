@@ -27,19 +27,45 @@ class ChatAssistant {
     final transactions = await store.getTransactions();
     final recurring = await store.getRecurringPayments();
 
-    // Step 1: instant local parse for obvious add-intent (works offline).
-    final parsed = _quickParse(message, settings.currencySymbol);
-    if (parsed != null) {
-      await store.addTransaction(parsed);
+    // Step 0: greetings are answered instantly, no LLM call needed.
+    final m = message.toLowerCase().trim();
+    if (RegExp(r'^(hi|hello|hey|yo|namaste|hola|sup|good (morning|afternoon|evening))\b[!.,? ]*$')
+        .hasMatch(m)) {
+      final reply = 'Hey! I\'m Sage. Log a transaction in plain English — e.g. '
+          '"spent 250 on biryani yesterday" or "60 for coffee" — or ask me '
+          'anything about your spending.';
       _remember('user', message);
-      _remember('assistant', 'Logged ${parsed.type == TransactionType.income ? "income" : "expense"} of ${settings.currencySymbol}${parsed.amount} (${parsed.category}).');
-      return AssistantReply(
-        text: 'Logged ${parsed.type == TransactionType.income ? "income" : "expense"} of '
-            '${settings.currencySymbol}${parsed.amount.toStringAsFixed(0)} '
-            '(${parsed.category})${parsed.note != null ? ' — "${parsed.note}"' : ""}. '
-            'Your Safe to Spend is updated.',
-        addedTransaction: parsed,
-      );
+      _remember('assistant', reply);
+      return AssistantReply(text: reply);
+    }
+
+    // Step 1: instant local parse for add-intent (works offline, no LLM
+    // needed for logging — also handles compound "X for A and Y for B").
+    final parsed = _quickParseAll(message);
+    if (parsed.isNotEmpty) {
+      for (final t in parsed) {
+        await store.addTransaction(t);
+      }
+      final cur = settings.currencySymbol;
+      final summary = parsed
+          .map((t) => '$cur${t.amount.toStringAsFixed(0)} (${t.category})'
+              '${t.note != null && t.note!.isNotEmpty && t.note!.toLowerCase() != t.category
+                  ? ' — "${t.note}"' : ''}')
+          .join(parsed.length == 2 ? ' and ' : ', ');
+      String text;
+      if (parsed.length == 1) {
+        final t = parsed.first;
+        text = 'Logged ${t.type == TransactionType.income ? "income" : "expense"} of $summary. '
+            'Your Safe to Spend is updated.';
+      } else {
+        final expenseCount =
+            parsed.where((t) => t.type == TransactionType.expense).length;
+        text = 'Logged ${parsed.length} transactions ($expenseCount expenses): $summary. '
+            'Your Safe to Spend is updated.';
+      }
+      _remember('user', message);
+      _remember('assistant', 'Logged ${parsed.length} transaction(s): $summary');
+      return AssistantReply(text: text, addedTransaction: parsed.first);
     }
 
     // Step 2: factual questions are answered EXACTLY from the local DB —
@@ -147,34 +173,69 @@ class ChatAssistant {
     return v.toStringAsFixed(v.abs() < 100 ? 2 : 0);
   }
 
-  TransactionModel? _quickParse(String message, String cur) {
+  /// Parses one or more transactions from natural language:
+  ///   "spent 1200 on shopping"          -> 1 expense
+  ///   "60 for coffee and 20 for e-rickshaw" -> 2 expenses (compound)
+  ///   "log 5000 salary"                 -> 1 income
+  /// Returns empty list if the message has no add-intent.
+  List<TransactionModel> _quickParseAll(String message) {
     final m = message.toLowerCase().trim();
     final isIncome = m.contains('earned') || m.contains('received') ||
         m.contains('salary') || m.contains('add income') ||
         RegExp(r'\blog\b.*\b(salary|income)\b').hasMatch(m);
     final isExpense = m.contains('spent') || m.contains('paid') || m.contains('bought') ||
         m.contains('add expense');
-    if (!isIncome && !isExpense) return null;
 
-    final amt = RegExp(r'(\d+(?:\.\d+)?)').firstMatch(m);
+    // "60 for coffee" — no verb, but "N for X" is still a log intent.
+    final implicit = RegExp(r'\b\d+(?:\.\d+)?\s*(?:for|on|towards)\s+\w+').hasMatch(m);
+
+    if (!isIncome && !isExpense && !implicit) return const [];
+
+    // Split compound messages: "60 for coffee and 20 for e-rickshaw"
+    final segments = m
+        .split(RegExp(r'\s*(?:,|\+|;|and then|then|and)\s*'))
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+
+    // Fast path: single segment (most common case)
+    if (segments.length <= 1) {
+      final t = _parseOne(m);
+      return t == null ? const [] : [t];
+    }
+
+    // Compound: parse each segment, keep only the ones with an amount.
+    final out = <TransactionModel>[];
+    for (final seg in segments) {
+      final t = _parseOne(seg.trim(), isIncomeOverride: isIncome);
+      if (t != null) out.add(t);
+    }
+    return out;
+  }
+
+  TransactionModel? _parseOne(String segment, {bool? isIncomeOverride}) {
+    final amt = RegExp(r'(\d+(?:\.\d+)?)').firstMatch(segment);
     if (amt == null) return null;
     final amount = double.parse(amt.group(1)!);
+    if (amount <= 0) return null;
 
-    final category = _guessCategory(m);
-    var date = DateTime.now();
-    if (m.contains('yesterday')) {
-      date = DateTime.now().subtract(const Duration(days: 1));
-    } else if (m.contains('day before')) {
-      date = DateTime.now().subtract(const Duration(days: 2));
-    }
+    final isIncome = isIncomeOverride ??
+        (segment.contains('earned') || segment.contains('received') ||
+            segment.contains('salary') || segment.contains('income'));
+
+    final category = _guessCategory(segment);
+    final date = segment.contains('yesterday')
+        ? DateTime.now().subtract(const Duration(days: 1))
+        : segment.contains('day before')
+            ? DateTime.now().subtract(const Duration(days: 2))
+            : DateTime.now();
 
     return TransactionModel(
       id: const Uuid().v4(),
       amount: amount,
-      type: isIncome && !m.contains('spent') ? TransactionType.income : TransactionType.expense,
+      type: isIncome ? TransactionType.income : TransactionType.expense,
       category: category,
       date: date,
-      note: _extractNote(m),
+      note: _extractNote(segment, category),
       createdAt: DateTime.now(),
     );
   }
@@ -182,7 +243,7 @@ class ChatAssistant {
   String _guessCategory(String m) {
     const map = {
       'food': ['food', 'biryani', 'lunch', 'dinner', 'breakfast', 'restaurant', 'pizza', 'swiggy', 'zomato', 'coffee', 'chai', 'snack', 'hotel', 'dosa', 'idli'],
-      'transport': ['uber', 'ola', 'auto', 'petrol', 'fuel', 'bus', 'metro', 'train', 'cab', 'travel'],
+      'transport': ['uber', 'ola', 'auto', 'petrol', 'fuel', 'bus', 'metro', 'train', 'cab', 'travel', 'rickshaw', 'rapido'],
       'groceries': ['grocery', 'groceries', 'vegetables', 'milk', 'kirana', 'supermarket', 'bigbasket', 'zepto'],
       'entertainment': ['movie', 'netflix', 'game', 'concert', 'spotify', 'party', 'club', 'ticket'],
       'shopping': ['shopping', 'clothes', 'amazon', 'flipkart', 'myntra', 'shoes', 'shirt', 'phone', 'headphones'],
@@ -199,10 +260,16 @@ class ChatAssistant {
     return 'other';
   }
 
-  String? _extractNote(String m) {
+  String? _extractNote(String m, String category) {
     final match = RegExp(r'(?:on|for|at)\s+(.+?)(?:\s+yesterday|\s+today)?$').firstMatch(m);
-    final raw = match?.group(1)?.trim();
+    var raw = match?.group(1)?.trim();
     if (raw == null || raw.isEmpty || raw.length > 60) return null;
+    // Don't duplicate the category in the note: "spent 1200 on shopping"
+    // should show note=null, not note="shopping".
+    if (raw.toLowerCase() == category.toLowerCase()) return null;
+    // Strip leading "spent"/"paid" residue in compound segments
+    raw = raw.replaceFirst(RegExp(r'^(?:spent|paid|bought|log(?:ged)?|add(?:ed)?)\s+'), '').trim();
+    if (raw.isEmpty) return null;
     return raw;
   }
 
