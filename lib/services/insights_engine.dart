@@ -22,10 +22,15 @@ class InsightsEngine {
 
   String get _cur => settings.currencySymbol;
 
+  bool get hasData => transactions.isNotEmpty;
+
+  List<TransactionModel> get _expenses =>
+      transactions.where((t) => t.type == TransactionType.expense).toList();
+
   /// Compact facts about the user's data, sent to the LLM as grounding.
   Map<String, dynamic> computeFacts() {
     final now = DateTime.now();
-    final expenses = transactions.where((t) => t.type == TransactionType.expense).toList();
+    final expenses = _expenses;
     final incomes = transactions.where((t) => t.type == TransactionType.income).toList();
 
     // This month vs last month
@@ -52,10 +57,20 @@ class InsightsEngine {
     final topCats = catTotals.entries.toList()
       ..sort((a, b) => b.value.compareTo(a.value));
 
+    // Last-month category totals (for trend comparison)
+    final lastCatTotals = <String, double>{};
+    for (final t in expenses) {
+      if (t.date.year == lastMonth.year && t.date.month == lastMonth.month) {
+        lastCatTotals[t.category] = (lastCatTotals[t.category] ?? 0) + t.amount;
+      }
+    }
+
     // Weekend vs weekday spending (last 8 weeks)
     double weekend = 0, weekday = 0;
     int weekendDays = 0, weekdayDays = 0;
-    for (var d = now.subtract(const Duration(days: 56)); d.isBefore(now); d = d.add(const Duration(days: 1))) {
+    for (var d = now.subtract(const Duration(days: 56));
+        d.isBefore(now);
+        d = d.add(const Duration(days: 1))) {
       final isWeekend = d.weekday == DateTime.saturday || d.weekday == DateTime.sunday;
       if (isWeekend) weekendDays++; else weekdayDays++;
     }
@@ -73,8 +88,16 @@ class InsightsEngine {
     final burnRate = spentThisMonth / dayOfMonth;
     final projectedMonth = burnRate * _daysInMonth(now);
 
+    // Weekly spending, last 4 weeks (for trend + chart)
+    final weeklySpend = <double>[0, 0, 0, 0]; // [4w ago .. this week]
+    for (final t in expenses) {
+      final weeksAgo = now.difference(t.date).inDays ~/ 7;
+      if (weeksAgo >= 0 && weeksAgo < 4) weeklySpend[3 - weeksAgo] += t.amount;
+    }
+
     // Recurring obligations next 30 days
     double upcoming = 0;
+    final upcomingList = <Map<String, dynamic>>[];
     final cutoff = now.add(const Duration(days: 30));
     for (final p in recurring.where((p) => p.isActive)) {
       var next = p.nextPaymentDate;
@@ -82,7 +105,45 @@ class InsightsEngine {
       while ((next.isBefore(cutoff) || _sameDay(next, cutoff)) && guard++ < 100) {
         if (p.endDate != null && next.isAfter(p.endDate!)) break;
         upcoming += p.amount;
+        upcomingList.add({'name': p.name, 'amount': p.amount, 'date': next.toIso8601String().substring(0, 10)});
         next = _nextDate(next, p.frequency);
+      }
+    }
+
+    // Anomaly detection: per-category, flag expenses > 2.5x category average
+    final anomalies = <Map<String, dynamic>>[];
+    final catAllTime = <String, List<double>>{};
+    for (final t in expenses) {
+      catAllTime.putIfAbsent(t.category, () => []).add(t.amount);
+    }
+    final catAvg = <String, double>{};
+    catAllTime.forEach((cat, amounts) {
+      var s = 0.0;
+      for (final a in amounts) {
+        s += a;
+      }
+      catAvg[cat] = s / amounts.length;
+    });
+    for (final t in expenses) {
+      final amounts = catAllTime[t.category]!;
+      if (amounts.length < 3) continue; // need history
+      final avg = catAvg[t.category]!;
+      if (t.amount > avg * 2.5 && t.amount > 100) {
+        anomalies.add({
+          'category': t.category,
+          'amount': t.amount,
+          'typical': avg,
+          'note': t.note ?? '',
+          'date': t.date.toIso8601String().substring(0, 10),
+        });
+      }
+    }
+
+    // Biggest single transaction this month
+    TransactionModel? biggest;
+    for (final t in expenses) {
+      if (t.date.year == now.year && t.date.month == now.month) {
+        if (biggest == null || t.amount > biggest.amount) biggest = t;
       }
     }
 
@@ -91,6 +152,7 @@ class InsightsEngine {
         : 0.0;
 
     return {
+      'today': now.toIso8601String().substring(0, 10),
       'currency': _cur,
       'current_balance': settings.currentBalance,
       'transactions_count': transactions.length,
@@ -102,8 +164,17 @@ class InsightsEngine {
           : null,
       'projected_month_end_spend': projectedMonth,
       'daily_burn_rate': burnRate,
+      'weekly_spend_last4': weeklySpend,
       'top_categories_this_month': [
-        for (final e in topCats.take(5)) {'category': e.key, 'amount': e.value}
+        for (final e in topCats.take(5))
+          {
+            'category': e.key,
+            'amount': e.value,
+            'last_month': lastCatTotals[e.key] ?? 0,
+            'trend_pct': (lastCatTotals[e.key] ?? 0) > 0
+                ? ((e.value - (lastCatTotals[e.key] ?? 0)) / lastCatTotals[e.key]!) * 100
+                : null,
+          }
       ],
       'weekend_vs_weekday_per_day': {
         'weekend': weekendPerDay,
@@ -111,7 +182,12 @@ class InsightsEngine {
         'weekend_ratio': weekdayPerDay > 0 ? weekendPerDay / weekdayPerDay : null,
       },
       'upcoming_obligations_30d': upcoming,
+      'upcoming_obligations_list': upcomingList,
       'savings_rate_pct': savingsRate,
+      'anomalies': anomalies.take(4).toList(),
+      'biggest_expense_this_month': biggest == null
+          ? null
+          : {'category': biggest.category, 'amount': biggest.amount, 'note': biggest.note ?? ''},
     };
   }
 
@@ -122,12 +198,12 @@ class InsightsEngine {
     final out = <Insight>[];
     final cur = _cur;
 
-    if ((facts['transactions_count'] as int) == 0) {
+    if (!hasData) {
       out.add(Insight(
         icon: '👋',
         title: 'Add some transactions first',
         body: 'Insights get smarter as you log income and expenses. '
-            'Try the AI Assistant — say "spent 250 on biryani yesterday".',
+            'Try the Assistant — say "spent 250 on biryani yesterday".',
         tone: InsightTone.neutral,
       ));
       return out;
@@ -170,12 +246,30 @@ class InsightsEngine {
     final cats = (facts['top_categories_this_month'] as List).cast<Map>();
     if (cats.isNotEmpty) {
       final top = cats.first;
+      final trend = top['trend_pct'] as double?;
+      var body = '$cur${(top['amount'] as double).toStringAsFixed(0)} this month '
+          '(${((top['amount'] as double) / math.max(facts['spent_this_month'] as double, 1) * 100).toStringAsFixed(0)}% of spending)';
+      if (trend != null) {
+        body += trend > 0
+            ? ' — up ${trend.abs().toStringAsFixed(0)}% vs last month.'
+            : ' — down ${trend.abs().toStringAsFixed(0)}% vs last month.';
+      }
       out.add(Insight(
         icon: '🏷️',
         title: 'Biggest category: ${top['category']}',
-        body: '$cur${(top['amount'] as double).toStringAsFixed(0)} this month '
-            '(${((top['amount'] as double) / math.max(facts['spent_this_month'] as double, 1) * 100).toStringAsFixed(0)}% of spending).',
+        body: body,
         tone: InsightTone.neutral,
+      ));
+    }
+
+    // Anomalies
+    for (final a in (facts['anomalies'] as List).cast<Map>()) {
+      out.add(Insight(
+        icon: '⚠️',
+        title: 'Unusual ${a['category']} expense: $cur${(a['amount'] as double).toStringAsFixed(0)}',
+        body: 'Typical ${a['category']} spends are $cur${(a['typical'] as double).toStringAsFixed(0)}.'
+            '${a['note'].toString().isNotEmpty ? ' ("${a['note']}")' : ""}',
+        tone: InsightTone.warning,
       ));
     }
 
@@ -227,8 +321,7 @@ class Insight {
 /// computed facts into warm, human-sounding advice. Falls back to the
 /// local insights if the network is unavailable — the demo never breaks.
 class AiAdvisor {
-  static const _endpoint =
-      'https://text.pollinations.ai/openai';
+  static const _endpoint = 'https://text.pollinations.ai/openai';
 
   int _attempts = 3;
   int _timeoutSeconds = 45;
@@ -260,13 +353,14 @@ class AiAdvisor {
             {
               'role': 'system',
               'content':
-                  'You are a friendly personal finance coach inside a student expense-tracker app. '
+                  'You are "Sage", a warm personal finance coach inside a student expense-tracker app. '
                   'You will be given verified financial facts computed by the app (JSON). '
                   'Write 3 short, warm insights in plain English. Rules: '
                   '1) ONLY use the numbers given — never invent or estimate new numbers. '
-                  '2) Each insight is one short sentence of insight + one short sentence of advice. '
+                  '2) Each insight: one short sentence of observation + one short sentence of friendly advice. '
                   '3) Use the currency symbol provided. '
-                  '4) Return ONLY a JSON array like: '
+                  '4) If an "anomalies" list is present, one of the insights MUST address it. '
+                  '5) Return ONLY a JSON array like: '
                   '[{"icon":"📊","title":"...","body":"...","tone":"good|warning|neutral"}] '
                   'with exactly 3 items. No markdown fences, no extra text.'
             },
@@ -301,6 +395,51 @@ class AiAdvisor {
       if (kDebugMode) debugPrint('AiAdvisor error: $e');
       return null;
     }
+  }
+
+  /// Ask the LLM a one-off question about the user's finances
+  /// (used by the Assistant for affordability checks etc.).
+  Future<String?> askQuestion(String question, Map<String, dynamic> facts) async {
+    for (var attempt = 1; attempt <= _attempts; attempt++) {
+      try {
+        final res = await http.post(
+          Uri.parse(_endpoint),
+          headers: {'Content-Type': 'application/json; charset=utf-8'},
+          body: utf8.encode(jsonEncode({
+            'model': 'openai-fast',
+            'max_tokens': 800,
+            'messages': [
+              {
+                'role': 'system',
+                'content': 'You are Sage, a friendly money coach in a student expense tracker. '
+                    'Answer the user\'s question using ONLY the verified financial facts given (JSON). '
+                    'Be warm and brief (max 3 sentences). For "can I afford X" questions: compare X\'s '
+                    'price against safe_to_spend, say clearly yes/no/depends, and give one practical tip. '
+                    'Never invent numbers. Currency symbol is provided in the facts. '
+                    'Return only plain text, no markdown.'
+              },
+              {
+                'role': 'user',
+                'content': 'FACTS: ${jsonEncode(facts)}\n\nQUESTION: $question'
+              }
+            ],
+          })),
+        ).timeout(Duration(seconds: _timeoutSeconds));
+
+        if (res.statusCode != 200) {
+          lastError = 'HTTP ${res.statusCode}';
+        } else {
+          final envelope = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+          final content = (envelope['choices']?[0]?['message']?['content'] ?? '').toString().trim();
+          if (content.isNotEmpty) return content;
+          lastError = 'empty content';
+        }
+      } catch (e) {
+        lastError = 'exception: $e';
+      }
+      if (attempt < _attempts) await Future.delayed(const Duration(seconds: 20));
+    }
+    return null;
   }
 
   String _extractJson(String raw) {

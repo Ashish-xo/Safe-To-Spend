@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import '../../models/transaction_model.dart';
 import '../../services/app_store.dart';
+import '../../theme/app_theme.dart';
 
 /// Bottom sheet to add an income/expense manually.
 /// (The original Home screen had dead "+ Income"/"+ Expense" buttons.)
@@ -78,16 +79,22 @@ class _AddTransactionSheetState extends State<AddTransactionSheet> {
         children: [
           Text(
             widget.isIncome ? 'Add Income' : 'Add Expense',
-            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: 18),
           TextField(
             controller: _amountCtrl,
             keyboardType: TextInputType.number,
             autofocus: true,
+            style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w700),
             decoration: InputDecoration(
               labelText: 'Amount',
               prefixText: widget.isIncome ? '+ ₹ ' : '- ₹ ',
+              prefixStyle: TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.w700,
+                color: widget.isIncome ? AppColors.primaryGreen : AppColors.accentRed,
+              ),
               border: const OutlineInputBorder(),
             ),
           ),

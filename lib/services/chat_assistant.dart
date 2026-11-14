@@ -4,60 +4,156 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import '../models/transaction_model.dart';
 import '../models/user_settings_model.dart';
-import '../models/recurring_payment_model.dart';
-import 'app_store.dart';
+import '../services/app_store.dart';
+import 'insights_engine.dart';
 
-/// AI chat assistant. Two abilities:
+/// AI chat assistant. Abilities:
 /// 1) Natural-language data entry: "spent 250 on biryani yesterday"
-///    -> the LLM returns a structured transaction which we insert.
+///    -> parsed locally (instant, offline) or by the LLM (richer).
 /// 2) Q&A over the user's local data: "how much did I spend on food?"
-///    -> we compute the answer locally from the DB (grounding), and the
-///    LLM only phrases it, or we answer directly without the LLM.
+///    -> grounded in the real DB, LLM phrases/analyses.
+/// 3) Affordability checks: "can I afford a 800 concert ticket?"
+/// 4) Conversation memory: follow-ups like "and last month?" work.
 class ChatAssistant {
   final AppStore store;
-  ChatAssistant(this.store);
-
+  final List<Map<String, String>> _history = []; // rolling conversation memory
+  static const _maxHistory = 10;
   static const _endpoint = 'https://text.pollinations.ai/openai';
+
+  ChatAssistant(this.store);
 
   Future<AssistantReply> handle(String message) async {
     final settings = await store.getSettings();
     final transactions = await store.getTransactions();
+    final recurring = await store.getRecurringPayments();
 
-    // Step 1: try to parse a quick add-intent locally first (fast path,
-    // no network). Falls through to the LLM if ambiguous.
+    // Step 1: instant local parse for obvious add-intent (works offline).
     final parsed = _quickParse(message, settings.currencySymbol);
     if (parsed != null) {
       await store.addTransaction(parsed);
+      _remember('user', message);
+      _remember('assistant', 'Logged ${parsed.type == TransactionType.income ? "income" : "expense"} of ${settings.currencySymbol}${parsed.amount} (${parsed.category}).');
       return AssistantReply(
         text: 'Logged ${parsed.type == TransactionType.income ? "income" : "expense"} of '
             '${settings.currencySymbol}${parsed.amount.toStringAsFixed(0)} '
             '(${parsed.category})${parsed.note != null ? ' — "${parsed.note}"' : ""}. '
-            'Anything else?',
+            'Your Safe to Spend is updated.',
         addedTransaction: parsed,
       );
     }
 
-    // Step 2: LLM with grounded data (retries — Pollinations free tier is
-    // 1 reply / 45s per IP).
-    AssistantReply? reply;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      if (attempt > 0) await Future.delayed(const Duration(seconds: 20));
-      reply = await _askLlm(message, settings, transactions);
-      if (reply != null) break;
+    // Step 2: factual questions are answered EXACTLY from the local DB —
+    // the LLM never does math (it hallucinates numbers on empty data).
+    final factual = _localFactualAnswer(message, settings, transactions);
+    if (factual != null) {
+      _remember('user', message);
+      _remember('assistant', factual.text);
+      return factual;
     }
+
+    // Step 3: LLM for open-ended advice/affordability (retries — Pollinations
+    // free tier is 1 reply / 45s per IP).
+    final reply = await _askLlm(message, settings, transactions, recurring);
     if (reply != null) return reply;
 
-    // Step 3: offline fallback — answer simple questions locally.
+    // Step 4: offline fallback.
     return _localFallback(message, settings, transactions);
+  }
+
+  void _remember(String role, String content) {
+    _history.add({'role': role, 'content': content});
+    if (_history.length > _maxHistory) _history.removeAt(0);
+  }
+
+  /// Answers factual "how much/many" questions with EXACT numbers computed
+  /// from the local DB. Returns null if the message isn't a factual query,
+  /// so it falls through to the LLM.
+  AssistantReply? _localFactualAnswer(
+      String message, UserSettings settings, List<TransactionModel> txs) {
+    final m = message.toLowerCase().trim();
+    final cur = settings.currencySymbol;
+    final now = DateTime.now();
+
+    final asksSpend = (m.contains('how much') || m.contains('what') || m.contains('total') || m.startsWith('spend')) &&
+        (m.contains('spend') || m.contains('spent') || m.contains('spending'));
+    final asksEarned = (m.contains('how much') || m.contains('total')) &&
+        (m.contains('earn') || m.contains('income') || m.contains('salary'));
+    final asksBalance = m.contains('balance') || m.contains('safe to spend');
+
+    if (!asksSpend && !asksEarned && !asksBalance) return null;
+
+    // Time window
+    DateTime? from;
+    var period = 'all time';
+    if (m.contains('today')) {
+      from = DateTime(now.year, now.month, now.day);
+      period = 'today';
+    } else if (m.contains('this week') || m.contains('this wk')) {
+      from = now.subtract(Duration(days: now.weekday - 1));
+      period = 'this week';
+    } else if (m.contains('this month') || (m.contains('month') && !m.contains('last'))) {
+      from = DateTime(now.year, now.month);
+      period = 'this month';
+    } else if (m.contains('last month')) {
+      final last = DateTime(now.year, now.month - 1);
+      double spent = 0;
+      for (final t in txs) {
+        if (t.type == TransactionType.expense &&
+            t.date.year == last.year && t.date.month == last.month) {
+          spent += t.amount;
+        }
+      }
+      return AssistantReply(text: 'You spent $cur${_fmt(spent)} $period.');
+    }
+
+    // Category filter
+    final categories = ['food', 'transport', 'groceries', 'entertainment', 'shopping', 'health', 'education', 'rent', 'utilities', 'other'];
+    String? cat;
+    for (final c in categories) {
+      if (m.contains(c)) {
+        cat = c;
+        break;
+      }
+    }
+
+    if (asksBalance) {
+      return AssistantReply(
+          text: 'Your balance is $cur${_fmt(settings.currentBalance)} — that\'s your Safe to Spend before upcoming obligations.');
+    }
+
+    double total = 0;
+    int count = 0;
+    for (final t in txs) {
+      final typeMatch = asksEarned ? t.type == TransactionType.income : t.type == TransactionType.expense;
+      if (!typeMatch) continue;
+      if (from != null && t.date.isBefore(from)) continue;
+      if (cat != null && t.category.toLowerCase() != cat) continue;
+      total += t.amount;
+      count++;
+    }
+
+    if (asksEarned) {
+      return AssistantReply(
+          text: 'You\'ve earned $cur${_fmt(total)} $period'
+              '${cat != null ? " from $cat" : ""} ($count entries).');
+    }
+    return AssistantReply(
+        text: 'You\'ve spent $cur${_fmt(total)} $period'
+            '${cat != null ? " on $cat" : ""} ($count transactions).');
+  }
+
+  String _fmt(double v) {
+    if (v == v.roundToDouble() && v.abs() < 1000000) return v.round().toString();
+    return v.toStringAsFixed(v.abs() < 100 ? 2 : 0);
   }
 
   TransactionModel? _quickParse(String message, String cur) {
     final m = message.toLowerCase().trim();
     final isIncome = m.contains('earned') || m.contains('received') ||
-        m.contains('got ') || m.contains('salary') || m.contains('income') ||
-        m.contains('add income');
+        m.contains('salary') || m.contains('add income') ||
+        RegExp(r'\blog\b.*\b(salary|income)\b').hasMatch(m);
     final isExpense = m.contains('spent') || m.contains('paid') || m.contains('bought') ||
-        m.contains('bought') || m.contains('bought') || m.contains('add expense');
+        m.contains('add expense');
     if (!isIncome && !isExpense) return null;
 
     final amt = RegExp(r'(\d+(?:\.\d+)?)').firstMatch(m);
@@ -68,9 +164,9 @@ class ChatAssistant {
     var date = DateTime.now();
     if (m.contains('yesterday')) {
       date = DateTime.now().subtract(const Duration(days: 1));
+    } else if (m.contains('day before')) {
+      date = DateTime.now().subtract(const Duration(days: 2));
     }
-
-    final note = _extractNote(m);
 
     return TransactionModel(
       id: const Uuid().v4(),
@@ -78,18 +174,18 @@ class ChatAssistant {
       type: isIncome && !m.contains('spent') ? TransactionType.income : TransactionType.expense,
       category: category,
       date: date,
-      note: note,
+      note: _extractNote(m),
       createdAt: DateTime.now(),
     );
   }
 
   String _guessCategory(String m) {
     const map = {
-      'food': ['food', 'biryani', 'lunch', 'dinner', 'breakfast', 'restaurant', 'pizza', 'swiggy', 'zomato', 'coffee', 'chai', 'snack', 'hotel'],
+      'food': ['food', 'biryani', 'lunch', 'dinner', 'breakfast', 'restaurant', 'pizza', 'swiggy', 'zomato', 'coffee', 'chai', 'snack', 'hotel', 'dosa', 'idli'],
       'transport': ['uber', 'ola', 'auto', 'petrol', 'fuel', 'bus', 'metro', 'train', 'cab', 'travel'],
       'groceries': ['grocery', 'groceries', 'vegetables', 'milk', 'kirana', 'supermarket', 'bigbasket', 'zepto'],
-      'entertainment': ['movie', 'netflix', 'game', 'concert', 'spotify', 'party', 'club'],
-      'shopping': ['shopping', 'clothes', 'amazon', 'flipkart', 'myntra', 'shoes', 'shirt', 'phone'],
+      'entertainment': ['movie', 'netflix', 'game', 'concert', 'spotify', 'party', 'club', 'ticket'],
+      'shopping': ['shopping', 'clothes', 'amazon', 'flipkart', 'myntra', 'shoes', 'shirt', 'phone', 'headphones'],
       'health': ['medicine', 'doctor', 'pharmacy', 'hospital', 'gym'],
       'education': ['books', 'tuition', 'course', 'fees', 'college', 'udemy'],
       'rent': ['rent', 'hostel', 'pg '],
@@ -111,10 +207,26 @@ class ChatAssistant {
   }
 
   Future<AssistantReply?> _askLlm(
-      String message, UserSettings settings, List<TransactionModel> transactions) async {
+      String message,
+      UserSettings settings,
+      List<TransactionModel> transactions,
+      List<dynamic> recurring) async {
     try {
-      // Grounding: compact data summary so the LLM answers from real data.
-      final summary = _dataSummary(settings, transactions);
+      // Grounding: full computed facts + compact transaction list.
+      final engine = InsightsEngine(
+          transactions: transactions,
+          recurring: recurring.cast(),
+          settings: settings);
+      final facts = engine.computeFacts();
+      final recent = transactions.take(30).map((t) => {
+            'amount': t.amount,
+            'type': t.type == TransactionType.income ? 'in' : 'out',
+            'category': t.category,
+            'date': t.date.toIso8601String().substring(0, 10),
+            'note': t.note ?? '',
+          }).toList();
+      facts['recent_transactions'] = recent;
+
       final res = await http.post(
         Uri.parse(_endpoint),
         headers: {'Content-Type': 'application/json; charset=utf-8'},
@@ -122,21 +234,25 @@ class ChatAssistant {
         // which corrupts ₹/emoji and causes HTTP 400.
         body: utf8.encode(jsonEncode({
           'model': 'openai-fast', // reasoning models exhaust tokens thinking -> 400
-          'max_tokens': 1500,
+          'max_tokens': 1200,
           'messages': [
             {
               'role': 'system',
               'content':
                   'You are "Sage", the AI assistant inside the Safe-to-Spend expense tracker app. '
-                  'You can see the user\'s real financial data below (JSON). '
-                  'Answer questions using ONLY that data. If asked to log a transaction, first reply '
-                  'with JSON: {"add_transaction": {"amount": number, "type": "expense|income", '
-                  '"category": "one word", "note": "short", "date": "YYYY-MM-DD"}} '
-                  'The app will insert it — do NOT refuse. Otherwise chat warmly and briefly. '
-                  'If the user asks something unrelated to finance, gently steer back. '
-                  'Currency: ${settings.currencySymbol}. Keep replies under 60 words.\n\n'
-                  'USER DATA: $summary'
+                  'You can see the user\'s REAL financial data (JSON "FACTS"). '
+                  'Capabilities: '
+                  'A) To log a transaction, reply with ONLY JSON: '
+                  '{"add_transaction": {"amount": number, "type": "expense|income", '
+                  '"category": "one lowercase word", "note": "short", "date": "YYYY-MM-DD"}} '
+                  'B) For "can I afford X" questions: compare with safe_to_spend/PROJECTED facts, '
+                  'give a clear yes/no/depends + one practical tip. '
+                  'C) Otherwise answer from the facts warmly and briefly (under 60 words). '
+                  'Rules: never invent numbers not in the facts; use the given currency symbol; '
+                  'for follow-up questions use the conversation history. '
+                  'Currency: ${settings.currencySymbol}.'
             },
+            ..._history.take(_maxHistory),
             {'role': 'user', 'content': message}
           ],
         })),
@@ -153,8 +269,10 @@ class ChatAssistant {
         final tx = _txFromAction(addAction);
         if (tx != null) {
           await store.addTransaction(tx);
+          _remember('user', message);
+          _remember('assistant', 'Logged transaction ${tx.amount}');
           return AssistantReply(
-            text: '✅ Logged! ${tx.type == TransactionType.income ? "Income" : "Expense"} of '
+            text: 'Logged! ${tx.type == TransactionType.income ? "Income" : "Expense"} of '
                 '${settings.currencySymbol}${tx.amount.toStringAsFixed(0)} (${tx.category})'
                 '${tx.note != null && tx.note!.isNotEmpty ? ' — "${tx.note}"' : ""}. '
                 'Your Safe to Spend is updated.',
@@ -163,43 +281,13 @@ class ChatAssistant {
         }
       }
 
+      _remember('user', message);
+      _remember('assistant', text);
       return AssistantReply(text: _stripJson(text));
     } catch (e) {
       if (kDebugMode) debugPrint('ChatAssistant LLM error: $e');
       return null;
     }
-  }
-
-  Map<String, dynamic> _dataSummary(UserSettings s, List<TransactionModel> txs) {
-    final now = DateTime.now();
-    double spentMonth = 0, earnedMonth = 0;
-    final byCat = <String, double>{};
-    for (final t in txs) {
-      if (t.date.year == now.year && t.date.month == now.month) {
-        if (t.type == TransactionType.expense) {
-          spentMonth += t.amount;
-          byCat[t.category] = (byCat[t.category] ?? 0) + t.amount;
-        } else {
-          earnedMonth += t.amount;
-        }
-      }
-    }
-    final recent = txs.take(30).map((t) => {
-          'amount': t.amount,
-          'type': t.type == TransactionType.income ? 'income' : 'expense',
-          'category': t.category,
-          'date': t.date.toIso8601String().substring(0, 10),
-          'note': t.note ?? '',
-        }).toList();
-
-    return {
-      'currency': s.currencySymbol,
-      'current_balance': s.currentBalance,
-      'spent_this_month': spentMonth,
-      'earned_this_month': earnedMonth,
-      'by_category_this_month': byCat,
-      'recent_transactions': recent,
-    };
   }
 
   Map<String, dynamic>? _extractAddAction(String text) {
@@ -214,7 +302,9 @@ class ChatAssistant {
   }
 
   TransactionModel? _txFromAction(Map<String, dynamic> a) {
-    final amount = (a['amount'] is num) ? (a['amount'] as num).toDouble() : double.tryParse('${a['amount']}');
+    final amount = (a['amount'] is num)
+        ? (a['amount'] as num).toDouble()
+        : double.tryParse('${a['amount']}');
     if (amount == null || amount <= 0) return null;
     final type = (a['type'] ?? 'expense').toString().toLowerCase().contains('income')
         ? TransactionType.income
@@ -243,11 +333,13 @@ class ChatAssistant {
         .trim();
   }
 
-  AssistantReply _localFallback(String message, UserSettings settings, List<TransactionModel> txs) {
+  AssistantReply _localFallback(
+      String message, UserSettings settings, List<TransactionModel> txs) {
     final m = message.toLowerCase();
     final now = DateTime.now();
-    if (m.contains('balance') || m.contains('safe') || m.contains('spend') && m.contains('how much')) {
-      return AssistantReply(text: 'Your current balance is ${settings.currencySymbol}${settings.currentBalance.toStringAsFixed(0)}.');
+    if (m.contains('balance') || m.contains('safe to spend') || (m.contains('how much') && m.contains('spend') == false)) {
+      return AssistantReply(
+          text: 'Your current balance is ${settings.currencySymbol}${settings.currentBalance.toStringAsFixed(0)}.');
     }
     if (m.contains('month') && (m.contains('spend') || m.contains('spent'))) {
       double spent = 0;
@@ -257,11 +349,12 @@ class ChatAssistant {
           spent += t.amount;
         }
       }
-      return AssistantReply(text: 'You\'ve spent ${settings.currencySymbol}${spent.toStringAsFixed(0)} this month. '
-          '(Offline mode — AI phrasing unavailable, numbers are still exact.)');
+      return AssistantReply(
+          text: 'You\'ve spent ${settings.currencySymbol}${spent.toStringAsFixed(0)} this month. '
+              '(Offline mode — AI phrasing unavailable, numbers are still exact.)');
     }
     return AssistantReply(
-      text: 'I\'m offline right now, but I can still log transactions. '
+      text: 'I\'m offline right now, but I can still log transactions instantly. '
           'Try: "spent 120 on coffee".',
     );
   }
