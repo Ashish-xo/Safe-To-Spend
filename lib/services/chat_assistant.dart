@@ -35,7 +35,7 @@ class ChatAssistant {
     final m = message.toLowerCase().trim();
     if (RegExp(r'^(hi|hello|hey|yo|namaste|hola|sup|good (morning|afternoon|evening))\b[!.,? ]*$')
         .hasMatch(m)) {
-      final reply = 'Hey! I\'m Sage. Log a transaction in plain English — e.g. '
+      const reply = 'Hey! I\'m Sage. Log a transaction in plain English — e.g. '
           '"spent 250 on biryani yesterday" or "60 for coffee" — or ask me '
           'anything about your spending.';
       _remember('user', message);
@@ -154,7 +154,7 @@ class ChatAssistant {
     final m = message.toLowerCase().trim();
     const cats = ['food', 'transport', 'groceries', 'entertainment', 'shopping',
         'health', 'education', 'rent', 'utilities', 'other'];
-    final uuid = const Uuid();
+    const uuid = Uuid();
 
     String? cat;
     for (final c in cats) {

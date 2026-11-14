@@ -170,7 +170,7 @@ class _BudgetsScreenState extends State<BudgetsScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Text('Over budget on ${b.category}',
-                  style: TextStyle(fontSize: 12, color: AppColors.accentRed)),
+                  style: const TextStyle(fontSize: 12, color: AppColors.accentRed)),
             )
           else if (approaching)
             Padding(

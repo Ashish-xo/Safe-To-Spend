@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
-import '../../models/recurring_payment_model.dart';
 import '../../models/transaction_model.dart';
 import '../../models/user_settings_model.dart';
 import '../../services/app_store.dart';
@@ -19,7 +18,6 @@ class InsightsScreen extends StatefulWidget {
 
 class _InsightsScreenState extends State<InsightsScreen> {
   List<TransactionModel>? _transactions;
-  List<RecurringPaymentModel>? _recurring;
   UserSettings? _settings;
   List<Insight> _localInsights = [];
   List<AiInsight> _aiInsights = [];
@@ -44,7 +42,6 @@ class _InsightsScreenState extends State<InsightsScreen> {
     setState(() {
       _settings = settings;
       _transactions = txs;
-      _recurring = rec;
       _localInsights = engine.generateLocalInsights();
       _aiInsights = [];
       _aiFailed = false;
@@ -230,7 +227,7 @@ class _InsightsScreenState extends State<InsightsScreen> {
                     getTooltipItem: (group, groupIndex, rod, rodIndex) =>
                         BarTooltipItem(
                           '$cur${rod.toY.toStringAsFixed(0)}',
-                          TextStyle(
+                          const TextStyle(
                               color: Colors.white,
                               fontSize: 12,
                               fontWeight: FontWeight.w700),

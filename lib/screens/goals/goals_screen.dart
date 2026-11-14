@@ -96,7 +96,7 @@ class _GoalsScreenState extends State<GoalsScreen> {
                   color: AppColors.primaryGreen.withValues(alpha: 0.12),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: Text('ON TRACK',
+                child: const Text('ON TRACK',
                     style: TextStyle(
                         fontSize: 10,
                         fontWeight: FontWeight.w800,

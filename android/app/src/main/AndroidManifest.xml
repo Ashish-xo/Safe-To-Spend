@@ -1,7 +1,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Release builds need INTERNET for the Sage AI assistant (Pollinations
+         API) and insights phrasing; debug/profile manifests already add it. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="Safe to Spend"
         android:name="${applicationName}"
+        android:allowBackup="false"
+        android:fullBackupContent="false"
         android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"

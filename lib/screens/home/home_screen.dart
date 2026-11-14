@@ -111,7 +111,7 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             // Greeting + date
             Text(_greeting,
-                style: TextStyle(
+                style: const TextStyle(
                     fontSize: 12.5,
                     fontWeight: FontWeight.w800,
                     letterSpacing: 1.2,
@@ -199,14 +199,14 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
-                child: Row(
+                child: const Row(
                   children: [
-                    const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
-                    const SizedBox(width: 10),
+                    Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+                    SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
-                        children: const [
+                        children: [
                           Text('Ask Sage',
                               style: TextStyle(
                                   color: Colors.white,
@@ -217,7 +217,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         ],
                       ),
                     ),
-                    const Icon(Icons.arrow_forward_ios, color: Colors.white70, size: 14),
+                    Icon(Icons.arrow_forward_ios, color: Colors.white70, size: 14),
                   ],
                 ),
               ),
@@ -296,7 +296,7 @@ class _HomeScreenState extends State<HomeScreen> {
         children: [
           Row(
             children: [
-              Text('SAFE TO SPEND',
+              const Text('SAFE TO SPEND',
                   style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w800,

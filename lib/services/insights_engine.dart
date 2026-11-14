@@ -31,7 +31,6 @@ class InsightsEngine {
   Map<String, dynamic> computeFacts() {
     final now = DateTime.now();
     final expenses = _expenses;
-    final incomes = transactions.where((t) => t.type == TransactionType.income).toList();
 
     // This month vs last month
     double spentThisMonth = 0, spentLastMonth = 0, earnedThisMonth = 0;
@@ -72,12 +71,20 @@ class InsightsEngine {
         d.isBefore(now);
         d = d.add(const Duration(days: 1))) {
       final isWeekend = d.weekday == DateTime.saturday || d.weekday == DateTime.sunday;
-      if (isWeekend) weekendDays++; else weekdayDays++;
+      if (isWeekend) {
+          weekendDays++;
+        } else {
+          weekdayDays++;
+        }
     }
     for (final t in expenses) {
       if (now.difference(t.date).inDays <= 56) {
         final isWeekend = t.date.weekday == DateTime.saturday || t.date.weekday == DateTime.sunday;
-        if (isWeekend) weekend += t.amount; else weekday += t.amount;
+        if (isWeekend) {
+            weekend += t.amount;
+          } else {
+            weekday += t.amount;
+          }
       }
     }
     final weekendPerDay = weekendDays > 0 ? weekend / weekendDays : 0.0;
@@ -323,8 +330,8 @@ class Insight {
 class AiAdvisor {
   static const _endpoint = 'https://text.pollinations.ai/openai';
 
-  int _attempts = 3;
-  int _timeoutSeconds = 45;
+  static const int _attempts = 3;
+  static const int _timeoutSeconds = 45;
   String? lastError; // surfaced in UI for diagnosis
 
   Future<String?> generateInsightNarrative(Map<String, dynamic> facts) async {
@@ -368,7 +375,7 @@ class AiAdvisor {
           ],
         })),
       )
-          .timeout(Duration(seconds: _timeoutSeconds));
+          .timeout(const Duration(seconds: _timeoutSeconds));
 
       if (res.statusCode != 200) {
         lastError = 'HTTP ${res.statusCode}';
@@ -424,7 +431,7 @@ class AiAdvisor {
               }
             ],
           })),
-        ).timeout(Duration(seconds: _timeoutSeconds));
+        ).timeout(const Duration(seconds: _timeoutSeconds));
 
         if (res.statusCode != 200) {
           lastError = 'HTTP ${res.statusCode}';
