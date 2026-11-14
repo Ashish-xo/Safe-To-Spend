@@ -4,8 +4,10 @@ import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import '../models/transaction_model.dart';
 import '../models/user_settings_model.dart';
+import '../models/budget_goal_models.dart';
 import '../services/app_store.dart';
 import 'insights_engine.dart';
+import 'budget_guard.dart';
 
 /// AI chat assistant. Abilities:
 /// 1) Natural-language data entry: "spent 250 on biryani yesterday"
@@ -39,7 +41,13 @@ class ChatAssistant {
       return AssistantReply(text: reply);
     }
 
-    // Step 1: instant local parse for add-intent (works offline, no LLM
+    // Step 1: Sage's management commands FIRST — "warn me when I spend over
+    // 200 on food" contains "200 on food" which would otherwise be mistaken
+    // for a transaction by the parser below.
+    final managed = await _manageBudgetsAndGoals(message, settings.currencySymbol);
+    if (managed != null) return managed;
+
+    // Step 2: instant local parse for add-intent (works offline, no LLM
     // needed for logging — also handles compound "X for A and Y for B").
     final parsed = _quickParseAll(message);
     if (parsed.isNotEmpty) {
@@ -63,12 +71,31 @@ class ChatAssistant {
         text = 'Logged ${parsed.length} transactions ($expenseCount expenses): $summary. '
             'Your Safe to Spend is updated.';
       }
+
+      // BUDGET GUARD: if this expense hits a monitored limit, warn NOW.
+      if (parsed.any((t) => t.type == TransactionType.expense)) {
+        final budgets = await store.getBudgets();
+        final allTxs = await store.getTransactions();
+        final guard = BudgetGuard(budgets: budgets, transactions: allTxs);
+        final warnings = <String>[];
+        for (final t in parsed.where((t) => t.type == TransactionType.expense)) {
+          for (final b in budgets) {
+            if (b.category.toLowerCase() != t.category.toLowerCase()) continue;
+            final alert = guard.alertFor(b);
+            if (alert != null) warnings.add(alert.warningText(cur));
+          }
+        }
+        if (warnings.isNotEmpty) {
+          text += '\n\n${warnings.toSet().join('\n')}';
+        }
+      }
+
       _remember('user', message);
       _remember('assistant', 'Logged ${parsed.length} transaction(s): $summary');
       return AssistantReply(text: text, addedTransaction: parsed.first);
     }
 
-    // Step 2: factual questions are answered EXACTLY from the local DB —
+    // Step 3: factual questions are answered EXACTLY from the local DB —
     // the LLM never does math (it hallucinates numbers on empty data).
     final factual = _localFactualAnswer(message, settings, transactions);
     if (factual != null) {
@@ -89,6 +116,153 @@ class ChatAssistant {
   void _remember(String role, String content) {
     _history.add({'role': role, 'content': content});
     if (_history.length > _maxHistory) _history.removeAt(0);
+  }
+
+  /// Sage has full control of budgets and goals via natural language:
+  ///   "set food budget to 3000" / "budget 2000 for shopping"
+  ///   "warn me when I spend over 1500 on food"
+  ///   "delete food budget" / "remove shopping budget"
+  ///   "start a 25000 phone goal" / "create goal laptop 80000"
+  ///   "add 500 to phone goal"
+  ///   "what are my budgets" / "show my goals"
+  /// Returns null when the message isn't a management command.
+  Future<AssistantReply?> _manageBudgetsAndGoals(String message, String cur) async {
+    final m = message.toLowerCase().trim();
+    const cats = ['food', 'transport', 'groceries', 'entertainment', 'shopping',
+        'health', 'education', 'rent', 'utilities', 'other'];
+    final uuid = const Uuid();
+
+    String? cat;
+    for (final c in cats) {
+      if (m.contains(c)) {
+        cat = c;
+        break;
+      }
+    }
+    final amount = double.tryParse(
+        RegExp(r'(\d+(?:\.\d+)?)').firstMatch(m)?.group(1) ?? '');
+
+    // "what are my budgets" / "show my goals"
+    if (RegExp(r'\b(what|show|list|my)\b.*\bbudgets?\b|\bbudgets?\?$').hasMatch(m) && amount == null) {
+      final budgets = await store.getBudgets();
+      if (budgets.isEmpty) {
+        return AssistantReply(text: 'You have no budgets yet. Tell me things like '
+            '"set food budget to 3000" and I\'ll watch your spending against it.');
+      }
+      final txs = await store.getTransactions();
+      final guard = BudgetGuard(budgets: budgets, transactions: txs);
+      final lines = budgets.map((b) {
+        final a = guard.alertFor(b);
+        final spent = guard.spentInPeriod(b.category);
+        final state = a == null
+            ? 'ok'
+            : a.isOver ? 'OVER' : '${(a.pct * 100).toStringAsFixed(0)}%';
+        return '• ${b.category}: $cur${spent.toStringAsFixed(0)} / $cur${b.limitAmount.toStringAsFixed(0)} ($state)';
+      }).join('\n');
+      return AssistantReply(text: 'Your budgets this month:\n$lines');
+    }
+    if (RegExp(r'\b(what|show|list|my)\b.*\bgoals?\b|\bgoals?\?$').hasMatch(m) && amount == null) {
+      final goals = await store.getSavingsGoals();
+      if (goals.isEmpty) {
+        return AssistantReply(text: 'No goals yet. Try "start a 25000 phone goal".');
+      }
+      final lines = goals
+          .map((g) => '• ${g.name}: $cur${g.savedAmount.toStringAsFixed(0)} / '
+              '$cur${g.targetAmount.toStringAsFixed(0)} (${(g.progress * 100).toStringAsFixed(0)}%)')
+          .join('\n');
+      return AssistantReply(text: 'Your goals:\n$lines');
+    }
+
+    // Create/update budget: "set food budget to 3000", "budget 2000 for shopping",
+    // "warn me when I spend over 1500 on food"
+    final wantsBudget = (m.contains('budget') || m.contains('limit') || m.contains('threshold') ||
+            m.contains('warn me') || m.contains('cap')) &&
+        cat != null &&
+        amount != null && amount > 0;
+    if (wantsBudget) {
+      await store.addBudget(BudgetModel(
+        id: uuid.v4(),
+        category: cat,
+        limitAmount: amount,
+        createdAt: DateTime.now(),
+      ));
+      return AssistantReply(text: 'Done — I\'m watching your $cat spending. I\'ll warn you '
+          'at 80% and when you cross $cur${amount.toStringAsFixed(0)} this month.');
+    }
+
+    // Delete budget: "delete/remove food budget"
+    if ((m.contains('delete') || m.contains('remove')) && m.contains('budget') && cat != null) {
+      final budgets = await store.getBudgets();
+      BudgetModel? match;
+      for (final b in budgets) {
+        if (b.category.toLowerCase() == cat) match = b;
+      }
+      if (match == null) {
+        return AssistantReply(text: 'You don\'t have a $cat budget to remove.');
+      }
+      await store.deleteBudget(match.id);
+      return AssistantReply(text: 'Removed your $cat budget. I\'ll stop tracking that limit.');
+    }
+
+    // Goal commands: "start a 25000 phone goal", "create goal laptop 80000"
+    final wantsGoal = (m.contains('goal') || m.contains('saving for') || m.contains('save for')) &&
+        amount != null && amount > 0 && !(m.contains('add') && m.contains('to'));
+    if (wantsGoal) {
+      // Goal name: try to grab a noun after "goal"/"for", else generic.
+      String name = _guessGoalName(m);
+      await store.addSavingsGoal(SavingsGoalModel(
+        id: uuid.v4(),
+        name: name,
+        targetAmount: amount,
+        createdAt: DateTime.now(),
+      ));
+      return AssistantReply(text: 'Goal "$name" created — target $cur${amount.toStringAsFixed(0)}. '
+          'Say "add 500 to $name goal" whenever you put money aside.');
+    }
+
+    // Add money to goal: "add 500 to phone goal"
+    final addMatch = RegExp(r'add\s+(\d+(?:\.\d+)?)\s+to\s+(.+?)(?:\s+goal)?$').firstMatch(m);
+    if (addMatch != null && m.contains('goal')) {
+      final addAmount = double.parse(addMatch.group(1)!);
+      final goalName = addMatch.group(2)!.trim();
+      final goals = await store.getSavingsGoals();
+      SavingsGoalModel? match;
+      for (final g in goals) {
+        if (g.name.toLowerCase().contains(goalName) || goalName.contains(g.name.toLowerCase())) {
+          match = g;
+        }
+      }
+      if (match == null) {
+        return AssistantReply(text: 'I couldn\'t find a goal matching "$goalName". '
+            'Say "show my goals" to see what you have.');
+      }
+      await store.updateSavingsGoal(SavingsGoalModel(
+        id: match.id,
+        name: match.name,
+        targetAmount: match.targetAmount,
+        savedAmount: match.savedAmount + addAmount,
+        createdAt: match.createdAt,
+      ));
+      final newTotal = match.savedAmount + addAmount;
+      final pct = (newTotal / match.targetAmount * 100).toStringAsFixed(0);
+      return AssistantReply(text: 'Added $cur${addAmount.toStringAsFixed(0)} to "${match.name}" — '
+          'now $cur${newTotal.toStringAsFixed(0)} of $cur${match.targetAmount.toStringAsFixed(0)} ($pct%).'
+          '${newTotal >= match.targetAmount ? ' 🎉 Goal reached!' : ''}');
+    }
+
+    return null; // not a management command
+  }
+
+  String _guessGoalName(String m) {
+    // "start a 25000 phone goal" -> "phone"; "create goal laptop 80000" -> "laptop"
+    final a = RegExp(r'\bgoal\s+([a-z]+)').firstMatch(m);
+    if (a != null) return a.group(1)!;
+    final b = RegExp(r'(\d+)\s+([a-z]+)\s+goal').firstMatch(m);
+    if (b != null) return b.group(2)!;
+    // "saving for a phone" / "25000 for phone"
+    final c = RegExp(r'(?:for|towards)\s+(?:a\s+|an\s+)?([a-z]+)').firstMatch(m);
+    if (c != null) return c.group(1)!;
+    return 'My goal';
   }
 
   /// Answers factual "how much/many" questions with EXACT numbers computed

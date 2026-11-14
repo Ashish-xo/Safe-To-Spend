@@ -7,6 +7,7 @@ import '../../models/transaction_model.dart';
 import '../../services/app_store.dart';
 import '../home/add_transaction_sheet.dart';
 import '../assistant/assistant_screen.dart';
+import '../../services/budget_guard.dart';
 
 /// Home screen matching the APK's dashboard:
 /// time-of-day greeting + date, SAFE TO SPEND hero card with "How this is
@@ -24,6 +25,7 @@ class _HomeScreenState extends State<HomeScreen> {
   double _safeToSpend = 0;
   bool _hasObligations = false;
   bool _upcomingExceedsBalance = false;
+  BudgetAlert? _budgetAlert;
 
   @override
   void initState() {
@@ -43,12 +45,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     final upcoming = payments.where((p) => p.isActive).fold<double>(0, (a, p) => a + p.amount);
 
+    // Sage's budget guard: worst active alert for the dashboard banner.
+    final budgets = await store.getBudgets();
+    BudgetAlert? alert;
+    if (budgets.isNotEmpty) {
+      alert = BudgetGuard(budgets: budgets, transactions: txs).worstAlert();
+    }
+
     setState(() {
       _settings = settings;
       _transactions = txs;
       _safeToSpend = safeToSpend;
       _hasObligations = upcoming > 0;
       _upcomingExceedsBalance = _hasObligations && safeToSpend < 0;
+      _budgetAlert = alert;
     });
   }
 
@@ -125,6 +135,40 @@ class _HomeScreenState extends State<HomeScreen> {
               style: Theme.of(context).textTheme.headlineMedium,
             ),
             const SizedBox(height: 20),
+
+            // SAGE BUDGET ALERT BANNER
+            if (_budgetAlert != null) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: (_budgetAlert!.isOver ? AppColors.accentRed : const Color(0xFFB25E00))
+                      .withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: (_budgetAlert!.isOver ? AppColors.accentRed : const Color(0xFFB25E00))
+                        .withValues(alpha: 0.4),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.warning_amber_rounded,
+                        size: 20,
+                        color: _budgetAlert!.isOver
+                            ? AppColors.accentRed
+                            : const Color(0xFFB25E00)),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _budgetAlert!.warningText(cur),
+                        style: const TextStyle(fontSize: 13, height: 1.35),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
 
             // SAFE TO SPEND hero
             _heroCard(isDark, cur),

@@ -20,8 +20,10 @@ class _AssistantScreenState extends State<AssistantScreen> {
 
   static const _suggestions = [
     'spent 250 on biryani yesterday',
+    'set food budget to 3000',
+    'warn me when I spend over 1500 on shopping',
+    'start a 25000 phone goal',
     'how much did I spend on food this month?',
-    'log 5000 salary',
     'can I afford a 800 concert ticket?',
   ];
 
