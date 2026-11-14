@@ -127,11 +127,18 @@ class _GoalsScreenState extends State<GoalsScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('$cur${g.savedAmount.toStringAsFixed(0)} of $cur${g.targetAmount.toStringAsFixed(0)}',
-                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
-              Text('${(pct * 100).toStringAsFixed(0)}%',
-                  style: const TextStyle(
-                      fontSize: 12.5, color: AppColors.primaryGreen, fontWeight: FontWeight.w700)),
+              Flexible(
+                child: Text('$cur${g.savedAmount.toStringAsFixed(0)} of $cur${g.targetAmount.toStringAsFixed(0)}',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
+              ),
+              Flexible(
+                child: Text('${(pct * 100).toStringAsFixed(0)}%',
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.right,
+                    style: const TextStyle(
+                        fontSize: 12.5, color: AppColors.primaryGreen, fontWeight: FontWeight.w700)),
+              ),
             ],
           ),
           const SizedBox(height: 10),

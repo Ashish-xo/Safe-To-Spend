@@ -105,22 +105,9 @@ class _HomeScreenState extends State<HomeScreen> {
     final keptToday = earnedToday - spentToday;
 
     return Scaffold(
-      // Floating "Ask Sage" button — one-tap access to the AI assistant.
-      floatingActionButton: Padding(
-        padding: const EdgeInsets.only(bottom: 76),
-        child: FloatingActionButton.extended(
-          onPressed: _openSage,
-          backgroundColor: AppColors.primaryGreen,
-          foregroundColor: Colors.white,
-          elevation: 4,
-          icon: const Icon(Icons.auto_awesome, size: 20),
-          label: const Text('Ask Sage',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5)),
-        ),
-      ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 110),
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 140),
           children: [
             // Greeting + date
             Text(_greeting,
@@ -187,6 +174,53 @@ class _HomeScreenState extends State<HomeScreen> {
                 _statChip(isDark, 'Kept', keptToday, Icons.savings_outlined,
                     AppColors.accentBlue),
               ],
+            ),
+
+            const SizedBox(height: 14),
+
+            // SAGE — prominent one-tap access, in-flow (no overlap on phones)
+            InkWell(
+              onTap: _openSage,
+              borderRadius: BorderRadius.circular(16),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF006C4C), Color(0xFF00A87A)],
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                  ),
+                  borderRadius: BorderRadius.circular(16),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.primaryGreen.withValues(alpha: 0.35),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.auto_awesome, color: Colors.white, size: 20),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: const [
+                          Text('Ask Sage',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14.5,
+                                  fontWeight: FontWeight.w800)),
+                          Text('Log, budget, or ask anything — plain English',
+                              style: TextStyle(color: Colors.white70, fontSize: 11)),
+                        ],
+                      ),
+                    ),
+                    const Icon(Icons.arrow_forward_ios, color: Colors.white70, size: 14),
+                  ],
+                ),
+              ),
             ),
 
             const SizedBox(height: 28),
@@ -411,9 +445,18 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          Text(
-            '${isIncome ? '+' : '-'}$cur${t.amount.toStringAsFixed(0)}',
-            style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: color),
+          Flexible(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 12),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  '${isIncome ? '+' : '-'}$cur${t.amount.toStringAsFixed(0)}',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 14.5, fontWeight: FontWeight.w800, color: color),
+                ),
+              ),
+            ),
           ),
         ],
       ),

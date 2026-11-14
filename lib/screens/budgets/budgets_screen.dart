@@ -149,13 +149,20 @@ class _BudgetsScreenState extends State<BudgetsScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('$cur${spent.toStringAsFixed(0)} of $cur${b.limitAmount.toStringAsFixed(0)}',
-                  style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
-              Text(
-                over
-                    ? 'Over budget by $cur${(spent - b.limitAmount).toStringAsFixed(0)}'
-                    : '$cur${(b.limitAmount - spent).toStringAsFixed(0)} left',
-                style: TextStyle(fontSize: 12.5, color: color, fontWeight: FontWeight.w600),
+              Flexible(
+                child: Text('$cur${spent.toStringAsFixed(0)} of $cur${b.limitAmount.toStringAsFixed(0)}',
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13.5, fontWeight: FontWeight.w600)),
+              ),
+              Flexible(
+                child: Text(
+                  over
+                      ? 'Over budget by $cur${(spent - b.limitAmount).toStringAsFixed(0)}'
+                      : '$cur${(b.limitAmount - spent).toStringAsFixed(0)} left',
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(fontSize: 12.5, color: color, fontWeight: FontWeight.w600),
+                ),
               ),
             ],
           ),
