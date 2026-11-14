@@ -8,6 +8,7 @@ import '../models/budget_goal_models.dart';
 import '../services/app_store.dart';
 import 'insights_engine.dart';
 import 'budget_guard.dart';
+import 'sage_phrases.dart';
 
 /// AI chat assistant. Abilities:
 /// 1) Natural-language data entry: "spent 250 on biryani yesterday"
@@ -21,6 +22,7 @@ class ChatAssistant {
   final List<Map<String, String>> _history = []; // rolling conversation memory
   static const _maxHistory = 10;
   static const _endpoint = 'https://text.pollinations.ai/openai';
+  late final SagePhrases _phrases = SagePhrases(store);
 
   ChatAssistant(this.store);
 
@@ -39,6 +41,23 @@ class ChatAssistant {
       _remember('user', message);
       _remember('assistant', reply);
       return AssistantReply(text: reply);
+    }
+
+    // Step 0.5: Sage's phrase templates (undo, affordability, help, etc.)
+    // — instant, offline, real numbers.
+    final phraseReply = await _phrases.handle(message, settings);
+    if (phraseReply != null) {
+      _remember('user', message);
+      _remember('assistant', phraseReply.text);
+      return phraseReply;
+    }
+
+    // Step 0.7: recurring bills: "remind me about my 499 netflix bill"
+    final recurringReply = await _phrases.recurringReminder(message, settings);
+    if (recurringReply != null) {
+      _remember('user', message);
+      _remember('assistant', recurringReply.text);
+      return recurringReply;
     }
 
     // Step 1: Sage's management commands FIRST — "warn me when I spend over
@@ -63,8 +82,13 @@ class ChatAssistant {
       String text;
       if (parsed.length == 1) {
         final t = parsed.first;
-        text = 'Logged ${t.type == TransactionType.income ? "income" : "expense"} of $summary. '
-            'Your Safe to Spend is updated.';
+        if (t.type == TransactionType.income) {
+          // Template 4: income confirmation with updated Safe to Spend.
+          text = await _phrases.incomeConfirmation(settings, t);
+        } else {
+          text = 'Logged ${t.type == TransactionType.income ? "income" : "expense"} of $summary. '
+              'Your Safe to Spend is updated.';
+        }
       } else {
         final expenseCount =
             parsed.where((t) => t.type == TransactionType.expense).length;
