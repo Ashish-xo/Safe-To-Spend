@@ -6,6 +6,7 @@ import '../../models/user_settings_model.dart';
 import '../../models/transaction_model.dart';
 import '../../services/app_store.dart';
 import '../home/add_transaction_sheet.dart';
+import '../assistant/assistant_screen.dart';
 
 /// Home screen matching the APK's dashboard:
 /// time-of-day greeting + date, SAFE TO SPEND hero card with "How this is
@@ -63,6 +64,13 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+  void _openSage() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AssistantScreen()),
+    );
+  }
+
   String get _greeting {
     final h = DateTime.now().hour;
     if (h < 12) return 'GOOD MORNING';
@@ -87,9 +95,22 @@ class _HomeScreenState extends State<HomeScreen> {
     final keptToday = earnedToday - spentToday;
 
     return Scaffold(
+      // Floating "Ask Sage" button — one-tap access to the AI assistant.
+      floatingActionButton: Padding(
+        padding: const EdgeInsets.only(bottom: 76),
+        child: FloatingActionButton.extended(
+          onPressed: _openSage,
+          backgroundColor: AppColors.primaryGreen,
+          foregroundColor: Colors.white,
+          elevation: 4,
+          icon: const Icon(Icons.auto_awesome, size: 20),
+          label: const Text('Ask Sage',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5)),
+        ),
+      ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 110),
           children: [
             // Greeting + date
             Text(_greeting,
