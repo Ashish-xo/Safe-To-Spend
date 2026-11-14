@@ -5,7 +5,8 @@ import '../../calculations/safe_to_spend_engine.dart';
 import '../../models/user_settings_model.dart';
 import '../../models/transaction_model.dart';
 import '../../models/recurring_payment_model.dart';
-import '../../database/app_database.dart';
+import '../../services/app_store.dart';
+import 'add_transaction_sheet.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -27,10 +28,11 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadData() async {
-    final db = AppDatabase.instance;
-    final settings = await db.getUserSettings();
-    final transactions = await db.getTransactions();
-    final recurring = await db.getRecurringPayments();
+    final store = AppStore();
+    await store.init();
+    final settings = await store.getSettings();
+    final transactions = await store.getTransactions();
+    final recurring = await store.getRecurringPayments();
 
     setState(() {
       _settings = settings;
@@ -38,6 +40,10 @@ class _HomeScreenState extends State<HomeScreen> {
       _recurringPayments = recurring;
       _isLoading = false;
     });
+  }
+
+  Future<void> _openAddSheet(bool isIncome) async {
+    await AddTransactionSheet.show(context, isIncome: isIncome, onSaved: _loadData);
   }
 
   @override
@@ -67,7 +73,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 16.0),
           child: Column(
-            crossAxisAlignment: CrossAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Header
               Text(
@@ -167,11 +173,11 @@ class _HomeScreenState extends State<HomeScreen> {
                 children: [
                   Expanded(
                     child: ElevatedButton(
-                      onPressed: () {},
+                      onPressed: () => _openAddSheet(true),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.primaryGreen,
                         foregroundColor: Colors.white,
-                        padding: const EdgeInsets.vertical(14),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),
@@ -185,11 +191,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: ElevatedButton(
-                      onPressed: () {},
+                      onPressed: () => _openAddSheet(false),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.accentRed,
                         foregroundColor: Colors.white,
-                        padding: const EdgeInsets.vertical(14),
+                        padding: const EdgeInsets.symmetric(vertical: 14),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(12),
                         ),
