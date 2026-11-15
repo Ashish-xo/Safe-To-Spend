@@ -93,6 +93,21 @@ class ChatAssistant {
           text = 'Logged ${t.type == TransactionType.income ? "income" : "expense"} of $summary. '
               'Your Safe to Spend is updated.';
         }
+        // Show the ML at work: when the Naive Bayes model (not the keyword
+        // map) decided the category, append the word-level evidence so the
+        // classification is transparent, not a black box.
+        final ex = classifier.explain(t.note ?? message);
+        if (ex.bestCategory == t.category &&
+            ex.trainingDocs > 0 &&
+            _keywordGuess(message) == 'other') {
+          final ev = ex.winningEvidence(t.category).take(2)
+              .map((e) => '"${e.word}"')
+              .join(' + ');
+          text += '\n\n🧠 Naive Bayes: classified as ${t.category} '
+              '(${(ex.confidence * 100).toStringAsFixed(0)}% confidence) — '
+              'evidence: $ev. Learned from your own past entries '
+              '(${ex.trainingDocs} training notes, ${ex.vocabularySize}-word vocabulary).';
+        }
       } else {
         final expenseCount =
             parsed.where((t) => t.type == TransactionType.expense).length;
@@ -139,10 +154,19 @@ class ChatAssistant {
     }
 
 
-    /// Step 3: LLM for open-ended advice/affordability (retries — Pollinations
+    // Step 3: LLM for open-ended advice/affordability (retries — Pollinations
     // free tier is 1 reply / 45s per IP).
     final reply = await _askLlm(message, settings, transactions, recurring);
-    if (reply != null) return reply;
+    if (reply != null) {
+      // Final guard: if all that survives sanitizing is debris, fall through
+      // to the offline template instead of showing an empty/garbage bubble.
+      final clean = reply.text.trim();
+      if (clean.isEmpty ||
+          clean.replaceAll(RegExp(r'[\{\}\[\]"\x27,\s]'), '').isEmpty) {
+        return _localFallback(message, settings, transactions);
+      }
+      return reply;
+    }
 
     // Step 4: offline fallback.
     return _localFallback(message, settings, transactions);
@@ -688,10 +712,15 @@ class ChatAssistant {
 
   String _stripJson(String text) {
     // Remove any JSON the model emitted so the user only sees prose.
-    return text
+    var t = text
         .replaceAll(RegExp(r'\{[\s\S]*?\}'), '')
         .replaceAll(RegExp(r'```[a-z]*'), '')
         .trim();
+    // Unbalanced braces survive the pair-removal above (e.g. a nested JSON
+    // action leaves a stray "}"). Drop any leftover bracket characters so
+    // JSON debris can never render as a chat bubble.
+    t = t.replaceAll(RegExp(r'[\{\}\[\]]'), '').trim();
+    return t;
   }
 
   AssistantReply _localFallback(

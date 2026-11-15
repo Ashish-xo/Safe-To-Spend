@@ -198,4 +198,144 @@ class CategoryClassifier {
   }
 
   static double log(num x) => x <= 0 ? -1000 : math.log(x);
+
+  /// Full decision trace for one note — the same math as [classify] but
+  /// exposing every intermediate value so the app can SHOW the model
+  /// thinking. Used by the "model brain" panel and in-reply explanations.
+  NaiveBayesExplanation explain(String text) {
+    final words = tokenize(text);
+    if (!isTrained || words.isEmpty) {
+      return NaiveBayesExplanation.empty(text, words);
+    }
+
+    final vocab = <String>{};
+    for (final b in _wordCounts.values) {
+      vocab.addAll(b.keys);
+    }
+    final vocabSize = vocab.isEmpty ? 1 : vocab.length;
+
+    // Per-category log-probability and per-word evidence.
+    final scores = <String, double>{};
+    final evidence =
+        <String, List<({String word, double logP, bool known})>>{};
+
+    for (final entry in _docCounts.entries) {
+      if (entry.value <= 0) continue;
+      final cat = entry.key;
+      final bucket = _wordCounts[cat] ?? const {};
+      final totalWords = bucket.values.fold<int>(0, (s, c) => s + c);
+      var score = log(_docCounts[cat]! / _totalDocs); // log P(cat)
+      final ev = <({String word, double logP, bool known})>[];
+      for (final w in words) {
+        final count = bucket[w] ?? 0;
+        // log P(word|cat) with add-one smoothing
+        final lp = log((count + _alpha) / (totalWords + _alpha * vocabSize));
+        score += lp;
+        ev.add((word: w, logP: lp, known: count > 0));
+      }
+      scores[cat] = score;
+      evidence[cat] = ev;
+    }
+
+    // Rank categories by log-probability.
+    final ranked = scores.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+    final best = ranked.isEmpty ? null : ranked.first;
+    final second = ranked.length > 1 ? ranked[1] : null;
+
+    // Vocabulary coverage + confidence, mirroring classify().
+    var knownWords = 0;
+    for (final w in words) {
+      for (final b in _wordCounts.values) {
+        if (b.containsKey(w)) {
+          knownWords++;
+          break;
+        }
+      }
+    }
+    final coverage = words.isEmpty ? 0.0 : knownWords / words.length;
+    final damp = knownWords == 0 ? 0.3 : 1.0;
+    final margin = (best == null || second == null)
+        ? 6.0
+        : (best.value - second.value);
+    final marginConf = (margin / 6.0).clamp(0.0, 1.0);
+    final confidence =
+        (damp * (0.55 * marginConf + 0.45 * coverage)).clamp(0.0, 1.0);
+
+    return NaiveBayesExplanation(
+      rawText: text,
+      words: words,
+      vocabularySize: vocabSize,
+      trainingDocs: _totalDocs,
+      knownWords: knownWords,
+      coverage: coverage,
+      confidence: confidence,
+      rankedScores: ranked
+          .map((e) => (category: e.key, logProb: e.value))
+          .toList(),
+      evidence: evidence,
+    );
+  }
+}
+
+/// The complete decision trace of one Naive Bayes classification — every
+/// number the model used, in a form a human (or a viva examiner) can read.
+class NaiveBayesExplanation {
+  final String rawText;
+  final List<String> words;
+  final int vocabularySize;
+  final int trainingDocs;
+  final int knownWords;
+  final double coverage;
+  final double confidence;
+  final List<({String category, double logProb})> rankedScores;
+  final Map<String, List<({String word, double logP, bool known})>> evidence;
+
+  const NaiveBayesExplanation({
+    required this.rawText,
+    required this.words,
+    required this.vocabularySize,
+    required this.trainingDocs,
+    required this.knownWords,
+    required this.coverage,
+    required this.confidence,
+    required this.rankedScores,
+    required this.evidence,
+  });
+
+  factory NaiveBayesExplanation.empty(String text, List<String> words) =>
+      NaiveBayesExplanation(
+        rawText: text,
+        words: words,
+        vocabularySize: 0,
+        trainingDocs: 0,
+        knownWords: 0,
+        coverage: 0,
+        confidence: 0,
+        rankedScores: const [],
+        evidence: const {},
+      );
+
+  String? get bestCategory =>
+      rankedScores.isEmpty ? null : rankedScores.first.category;
+
+  /// Probability that the best category beats the runner-up, computed by
+  /// softmax over the top log-probabilities — the closest thing to
+  /// P(best | text) the model can offer.
+  double get bestVsSecond {
+    if (rankedScores.length < 2) return 1.0;
+    final a = rankedScores[0].logProb, b = rankedScores[1].logProb;
+    // softmax with max-shift for numeric stability
+    final m = math.max(a, b);
+    final ea = math.exp(a - m), eb = math.exp(b - m);
+    return ea / (ea + eb);
+  }
+
+  /// The words that pushed the decision toward the winning category
+  /// (highest per-word log-probability in the best category).
+  List<({String word, double logP})> winningEvidence(String category) {
+    final ev = evidence[category];
+    if (ev == null) return const [];
+    final sorted = [...ev]..sort((x, y) => y.logP.compareTo(x.logP));
+    return sorted.map((e) => (word: e.word, logP: e.logP)).toList();
+  }
 }

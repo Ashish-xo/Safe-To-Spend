@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../../theme/app_theme.dart';
 import '../insights/insights_screen.dart';
 import '../assistant/assistant_screen.dart';
+import 'model_brain_screen.dart';
 import 'transactions_screen.dart';
 import 'settings_screen.dart';
 import '../../services/app_store.dart';
@@ -80,6 +81,14 @@ class _MoreScreenState extends State<MoreScreen> {
               'How far ahead to look when counting upcoming payments',
               onTap: () => Navigator.push(context,
                   MaterialPageRoute(builder: (_) => const SettingsScreen()))),
+
+          const SizedBox(height: 24),
+
+          _sectionLabel(isDark, 'AI / MACHINE LEARNING'),
+          _row(context, Icons.psychology_outlined, 'Model brain',
+              'See how the Naive Bayes classifier thinks — word by word',
+              onTap: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => const ModelBrainScreen()))),
 
           const SizedBox(height: 28),
           Text(
