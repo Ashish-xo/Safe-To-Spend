@@ -9,6 +9,8 @@ class TransactionModel {
   final String? note;
   final DateTime createdAt;
 
+  bool get isExpense => type == TransactionType.expense;
+
   TransactionModel({
     required this.id,
     required this.amount,

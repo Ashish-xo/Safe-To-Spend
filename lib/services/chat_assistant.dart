@@ -9,6 +9,7 @@ import '../services/app_store.dart';
 import 'insights_engine.dart';
 import 'budget_guard.dart';
 import 'sage_phrases.dart';
+import 'category_classifier.dart';
 
 /// AI chat assistant. Abilities:
 /// 1) Natural-language data entry: "spent 250 on biryani yesterday"
@@ -68,7 +69,10 @@ class ChatAssistant {
 
     // Step 2: instant local parse for add-intent (works offline, no LLM
     // needed for logging — also handles compound "X for A and Y for B").
-    final parsed = _quickParseAll(message);
+    // The on-device Naive Bayes classifier is retrained on every message
+    // (O(N) — instant at personal scale), so it learns from each new entry.
+    final classifier = CategoryClassifier()..trainFrom(transactions);
+    final parsed = _quickParseAll(message, classifier);
     if (parsed.isNotEmpty) {
       for (final t in parsed) {
         await store.addTransaction(t);
@@ -119,6 +123,12 @@ class ChatAssistant {
       return AssistantReply(text: text, addedTransaction: parsed.first);
     }
 
+    // Step 2.5: teach-the-model corrections — "kebab was food",
+    // "mark dominos as food", "chips = food". Feeds the Naive Bayes
+    // classifier directly so future notes with those words classify right.
+    final correction = _handleCategoryCorrection(message, transactions);
+    if (correction != null) return correction;
+
     // Step 3: factual questions are answered EXACTLY from the local DB —
     // the LLM never does math (it hallucinates numbers on empty data).
     final factual = _localFactualAnswer(message, settings, transactions);
@@ -128,13 +138,50 @@ class ChatAssistant {
       return factual;
     }
 
-    // Step 3: LLM for open-ended advice/affordability (retries — Pollinations
+
+    /// Step 3: LLM for open-ended advice/affordability (retries — Pollinations
     // free tier is 1 reply / 45s per IP).
     final reply = await _askLlm(message, settings, transactions, recurring);
     if (reply != null) return reply;
 
     // Step 4: offline fallback.
     return _localFallback(message, settings, transactions);
+  }
+
+  /// "Teach the model" corrections: "kebab was food", "mark dominos as
+  /// food", "chips = food". Persists as a correction record so it survives
+  /// restarts, and re-trains the in-memory model now.
+  AssistantReply? _handleCategoryCorrection(
+      String message, List<TransactionModel> transactions) {
+    final m = message.toLowerCase().trim();
+    // "<word(s)> is/was <cat>", "mark <word(s)> as <cat>", "<word> = <cat>"
+    final match = RegExp(
+            r'^(?:mark\s+)?([a-z][a-z0-9 ]{1,30}?)\s+(?:is|was|=|as)\s+'
+            r'(food|transport|groceries|entertainment|shopping|health|education|rent|utilities)$')
+        .firstMatch(m);
+    if (match == null) return null;
+
+    final words = match.group(1)!.trim();
+    final category = match.group(2)!;
+    if (RegExp(r'\d').hasMatch(words)) return null;
+
+    // Persist: store as a zero-amount correction record with a '_learn:'
+    // note. trainFrom picks these up on every future session.
+    final record = TransactionModel(
+      id: const Uuid().v4(),
+      amount: 0,
+      type: TransactionType.expense,
+      category: category,
+      date: DateTime.now(),
+      note: '_learn: $words',
+      createdAt: DateTime.now(),
+    );
+    store.addTransaction(record);
+
+    return AssistantReply(
+      text: "Learned! I'll now categorize \"$words\" as $category. "
+          'Try logging something like "spent 100 on $words" to see it work.',
+    );
   }
 
   void _remember(String role, String content) {
@@ -376,7 +423,8 @@ class ChatAssistant {
   ///   "60 for coffee and 20 for e-rickshaw" -> 2 expenses (compound)
   ///   "log 5000 salary"                 -> 1 income
   /// Returns empty list if the message has no add-intent.
-  List<TransactionModel> _quickParseAll(String message) {
+  List<TransactionModel> _quickParseAll(
+      String message, CategoryClassifier classifier) {
     final m = message.toLowerCase().trim();
     final isIncome = m.contains('earned') || m.contains('received') ||
         m.contains('salary') || m.contains('add income') ||
@@ -385,7 +433,16 @@ class ChatAssistant {
         m.contains('add expense');
 
     // "60 for coffee" — no verb, but "N for X" is still a log intent.
-    final implicit = RegExp(r'\b\d+(?:\.\d+)?\s*(?:for|on|towards)\s+\w+').hasMatch(m);
+    final implicit = RegExp(r'\b\d+(?:\.\d+)?\s*(?:for|on|towards)\s+\w+')
+            .hasMatch(m) ||
+        // "biryani order 300" — category word + amount with no question
+        // words is also a log intent (amount placed after the noun).
+        (!RegExp(
+                    r'\b(how|what|when|where|did|do|does|show|list|compare|top|much|many|avg|average)\b')
+                .hasMatch(m) &&
+            RegExp(r'\b\d+(?:\.\d+)?\b').hasMatch(m) &&
+            _keywordGuess(m) != 'other' &&
+            !isIncome);
 
     if (!isIncome && !isExpense && !implicit) return const [];
 
@@ -397,20 +454,21 @@ class ChatAssistant {
 
     // Fast path: single segment (most common case)
     if (segments.length <= 1) {
-      final t = _parseOne(m);
+      final t = _parseOne(m, classifier);
       return t == null ? const [] : [t];
     }
 
     // Compound: parse each segment, keep only the ones with an amount.
     final out = <TransactionModel>[];
     for (final seg in segments) {
-      final t = _parseOne(seg.trim(), isIncomeOverride: isIncome);
+      final t = _parseOne(seg.trim(), classifier, isIncomeOverride: isIncome);
       if (t != null) out.add(t);
     }
     return out;
   }
 
-  TransactionModel? _parseOne(String segment, {bool? isIncomeOverride}) {
+  TransactionModel? _parseOne(String segment, CategoryClassifier classifier,
+      {bool? isIncomeOverride}) {
     final amt = RegExp(r'(\d+(?:\.\d+)?)').firstMatch(segment);
     if (amt == null) return null;
     final amount = double.parse(amt.group(1)!);
@@ -420,7 +478,8 @@ class ChatAssistant {
         (segment.contains('earned') || segment.contains('received') ||
             segment.contains('salary') || segment.contains('income'));
 
-    final category = _guessCategory(segment);
+    final category =
+        classifier.guessWithFallback(segment, _keywordGuess);
     final date = segment.contains('yesterday')
         ? DateTime.now().subtract(const Duration(days: 1))
         : segment.contains('day before')
@@ -438,7 +497,10 @@ class ChatAssistant {
     );
   }
 
-  String _guessCategory(String m) {
+  /// Deterministic keyword map — the classifier's first line of defense.
+  /// The Naive Bayes model (CategoryClassifier) only kicks in when none of
+  /// these keywords match, learning category words from the user's history.
+  String _keywordGuess(String m) {
     const map = {
       'food': ['food', 'biryani', 'lunch', 'dinner', 'breakfast', 'restaurant', 'pizza', 'swiggy', 'zomato', 'coffee', 'chai', 'snack', 'hotel', 'dosa', 'idli'],
       'transport': ['uber', 'ola', 'auto', 'petrol', 'fuel', 'bus', 'metro', 'train', 'cab', 'travel', 'rickshaw', 'rapido'],
@@ -461,7 +523,22 @@ class ChatAssistant {
   String? _extractNote(String m, String category) {
     final match = RegExp(r'(?:on|for|at)\s+(.+?)(?:\s+yesterday|\s+today)?$').firstMatch(m);
     var raw = match?.group(1)?.trim();
-    if (raw == null || raw.isEmpty || raw.length > 60) return null;
+    if (raw == null || raw.isEmpty || raw.length > 60) {
+      // Fallback: "rapido ride to office 120" has no on/for/at. Take the
+      // leading words before the amount (minus category words) as the note
+      // so the classifier still learns the brand/item words.
+      final amountAt = RegExp(r'(\d+(?:\.\d+)?)').firstMatch(m);
+      if (amountAt != null && amountAt.start > 0) {
+        raw = m.substring(0, amountAt.start).trim();
+        raw = raw.replaceFirst(RegExp(r'^(?:spent|paid|bought|log(?:ged)?|add(?:ed)?)\s+'), '').trim();
+        // Drop the bare category word ("food", "transport", ...) from notes
+        // — it carries no new vocabulary for the model.
+        raw = raw.replaceFirst(RegExp('^${RegExp.escape(category)}\\s+'), '').trim();
+        if (raw.isEmpty || raw == category || raw.length > 60) return null;
+      } else {
+        return null;
+      }
+    }
     // Don't duplicate the category in the note: "spent 1200 on shopping"
     // should show note=null, not note="shopping".
     if (raw.toLowerCase() == category.toLowerCase()) return null;
@@ -525,7 +602,13 @@ class ChatAssistant {
 
       if (res.statusCode != 200) return null;
       final envelope = jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-      final text = (envelope['choices']?[0]?['message']?['content'] ?? '').toString().trim();
+      var text = (envelope['choices']?[0]?['message']?['content'] ?? '')
+          .toString()
+          .trim();
+      if (text.isEmpty) return null;
+      // Defensive: a truncated/malformed LLM reply (e.g. a lone "}") must
+      // never reach the chat as a visible message.
+      text = _sanitizeLlmReply(text);
       if (text.isEmpty) return null;
 
       // If the LLM returned an add-transaction action, perform it.
@@ -553,6 +636,19 @@ class ChatAssistant {
       if (kDebugMode) debugPrint('ChatAssistant LLM error: $e');
       return null;
     }
+  }
+
+  /// Strips obvious LLM failure artifacts from a reply. Returns '' when the
+  /// reply is pure garbage (JSON fragments, single braces) and should be
+  /// dropped rather than shown.
+  String _sanitizeLlmReply(String text) {
+    var t = text.trim();
+    // Drop replies that are only JSON debris: braces/brackets/quotes/commas.
+    final meaningful = t.replaceAll(RegExp(r'[\{\}\[\]"\x27,\s]'), '');
+    if (meaningful.isEmpty) return '';
+    // Strip a leading/trailing stray brace that leaked from truncation.
+    t = t.replaceFirst(RegExp(r'^[\}\)\]]+\s*'), '').replaceFirst(RegExp(r'\s*[\{\(\[]+$'), '').trim();
+    return t;
   }
 
   Map<String, dynamic>? _extractAddAction(String text) {
